@@ -30,7 +30,7 @@ class Symbol:
     type: str
     availableSince: pd.DatetimeIndex
     availableTo: pd.DatetimeIndex
-    
+
     @property
     def active(self):
         # set tz = UTC
@@ -134,27 +134,27 @@ def unify_datetime(input: Union[str, datetime.datetime]) -> datetime.datetime:
 def exists_month(month_url, max_retries=5):
     if get_local_data_path(month_url).exists():
         return True
-        
+
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
-    
+
     for attempt in range(max_retries):
         try:
             resp = httpx.get(month_url, headers=headers)
-            
+
             if resp.status_code == 200:
                 return True
             elif resp.status_code == 404:
                 return False
             else:
                 raise NetworkError(resp.status_code)
-                
+
         except (httpx.TimeoutException, httpx.NetworkError) as e:
             if attempt == max_retries - 1:  # 最后一次尝试
                 raise NetworkError(e)
             # 指数退避等待
-            time.sleep(2 ** attempt)
+            time.sleep(2**attempt)
             continue
 
 
@@ -238,7 +238,7 @@ def gen_dates(
 
     if non_existent_start:
         non_existent_end = months[0] - pd.Timedelta(days=1) if months else end
-        warning_message = f"Data does not exist for the period: {non_existent_start.strftime('%Y-%m')} to {non_existent_end.strftime('%Y-%m')}"
+        warning_message = f"{symbol} Data does not exist for the period: {non_existent_start.strftime('%Y-%m')} to {non_existent_end.strftime('%Y-%m')}"
         warnings.warn(warning_message)
 
     return months, days
@@ -265,7 +265,7 @@ def get_data(
             df = download_data(data_type, data_tz, url)
             save_data_to_disk(url, df, save_local)
         except DataNotFound:
-            warn = f"Data not found: {url}"
+            warn = f"{symbol} Data not found: {url}"
             warnings.warn(warn)
             return None
     return df
@@ -342,7 +342,7 @@ async def download_data_async(
     data_type: str,
     data_tz: str,
     url: str,
-    max_retries: int = 3,
+    max_retries: int = 5,
     session: aiohttp.ClientSession = None,
     limiter: asynciolimiter.Limiter = None,
 ) -> DataFrame:
@@ -356,6 +356,7 @@ async def download_data_async(
     ]
     if limiter is not None:
         await limiter.wait()
+
     async def attempt_download():
         try:
             async with session.get(
@@ -394,6 +395,25 @@ async def download_data_async(
         return load_metrics(data_tz, content)
 
 
+def convert_timestamp(df, column_name, data_tz):
+    timestamp_length = len(str(df[column_name].iloc[0]))
+
+    if timestamp_length == 13:  # milliseconds
+        unit = "ms"
+    elif timestamp_length == 16:  # microseconds
+        unit = "us"
+    elif timestamp_length == 19:  # nanoseconds
+        unit = "ns"
+    else:
+        raise ValueError("Unsupported timestamp length")
+
+    df["datetime"] = pd.to_datetime(df[column_name], unit=unit, utc=True).dt.tz_convert(
+        data_tz
+    )
+    df.set_index("datetime", inplace=True)
+    return df
+
+
 def load_klines(data_tz: str, content: bytes) -> DataFrame:
     with zipfile.ZipFile(io.BytesIO(content)) as zipf:
         csv_name = zipf.namelist()[0]
@@ -417,10 +437,7 @@ def load_klines(data_tz: str, content: bytes) -> DataFrame:
                     "ignore",
                 ],
             )
-            df["datetime"] = pd.to_datetime(
-                df.open_time, unit="ms", utc=True
-            ).dt.tz_convert(data_tz)
-            df.set_index("datetime", inplace=True)
+            df = convert_timestamp(df, "open_time", data_tz)
     return df
 
 
@@ -442,10 +459,7 @@ def load_agg_trades(data_tz: str, content: bytes) -> DataFrame:
                     "is_buyer_maker",
                 ],
             )
-            df["datetime"] = pd.to_datetime(
-                df.transact_time, unit="ms", utc=True
-            ).dt.tz_convert(data_tz)
-            df.set_index("datetime", inplace=True)
+            df = convert_timestamp(df, "transact_time", data_tz)
     return df
 
 
@@ -467,10 +481,7 @@ def load_book_ticker(data_tz: str, content: bytes) -> DataFrame:
                     "event_time",
                 ],
             )
-            df["datetime"] = pd.to_datetime(
-                df.event_time, unit="ms", utc=True
-            ).dt.tz_convert(data_tz)
-            df.set_index("datetime", inplace=True)
+            df = convert_timestamp(df, "event_time", data_tz)
     return df
 
 
@@ -484,10 +495,7 @@ def load_funding_rate(data_tz: str, content: bytes) -> DataFrame:
                 usecols=[0, 1, 2],
                 names=["calc_time", "funding_interval_hours", "last_funding_rate"],
             )
-            df["datetime"] = pd.to_datetime(
-                df.calc_time, unit="ms", utc=True
-            ).dt.tz_convert(data_tz)
-            df.set_index("datetime", inplace=True)
+            df = convert_timestamp(df, "calc_time", data_tz)
     return df
 
 
@@ -501,10 +509,7 @@ def load_trades(data_tz: str, content: bytes) -> DataFrame:
                 usecols=[0, 1, 2, 3, 4, 5],
                 names=["id", "price", "qty", "base_qty", "time", "is_buyer_maker"],
             )
-            df["datetime"] = pd.to_datetime(df.time, unit="ms", utc=True).dt.tz_convert(
-                data_tz
-            )
-            df.set_index("datetime", inplace=True)
+            df = convert_timestamp(df, "time", data_tz)
     return df
 
 
@@ -527,10 +532,7 @@ def load_metrics(data_tz: str, content: bytes) -> DataFrame:
                     "sum_taker_long_short_vol_ratio",
                 ],
             )
-            df["datetime"] = pd.to_datetime(df.create_time, utc=True).dt.tz_convert(
-                data_tz
-            )
-            df.set_index("datetime", inplace=True)
+            df = convert_timestamp(df, "create_time", data_tz)
     return df
 
 
